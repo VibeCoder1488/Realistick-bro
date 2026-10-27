@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Луг у моря</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#9bc3ee;font-family:Georgia,serif}
+canvas{display:block}
+html,body{touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+#joy{position:fixed;display:none;width:110px;height:110px;border-radius:50%;background:rgba(255,255,255,.14);border:2px solid rgba(255,255,255,.35);pointer-events:none}
+#knob{position:absolute;left:35px;top:35px;width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.5)}
+#btns{display:none;position:fixed;right:calc(14px + env(safe-area-inset-right,0px));bottom:calc(18px + env(safe-area-inset-bottom,0px));flex-direction:column;gap:10px}
+#btns button{width:58px;height:58px;border-radius:50%;border:2px solid rgba(255,255,255,.5);background:rgba(20,40,20,.45);color:#fff;font-size:15px;touch-action:none}
+#btns button.on{background:rgba(120,200,90,.75)}
+.touch #btns{display:flex}
+#vrBtn{display:none;position:fixed;top:calc(14px + env(safe-area-inset-top,0px));right:calc(14px + env(safe-area-inset-right,0px));padding:10px 16px;border-radius:20px;border:2px solid rgba(255,255,255,.6);background:rgba(20,40,20,.55);color:#fff;font:15px Georgia,serif}
+#glare,#wash,#uwv{position:fixed;inset:0;pointer-events:none}#uwv{opacity:0;background:radial-gradient(ellipse at center,rgba(20,120,140,.3) 0%,rgba(0,50,80,.75) 100%)}
+.ghost{position:fixed;border-radius:50%;pointer-events:none;opacity:0;mix-blend-mode:screen}
+#hint{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);color:#fff;background:rgba(20,40,20,.55);padding:10px 18px;border-radius:20px;font-size:15px;text-align:center;pointer-events:none;transition:opacity 1s;max-width:90vw}
+</style></head><body>
+<div id="glare"></div><div id="wash" style="background:#fff7e0;opacity:0"></div>
+<div id="joy"><div id="knob"></div></div><div id="btns"><button id="bUp">▲</button><button id="bRun">Бег</button><button id="bDn">▼</button></div><button id="vrBtn">Войти в VR</button><div id="hint">Кликните по экрану. WASD — идти, Shift — бежать, мышь или стрелки — смотреть. Впереди море: заходите в воду. Space — всплыть, C — нырнуть. После выхода из воды на камере остаются капли.</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const T=THREE,F=90;
+const MOB=matchMedia('(pointer:coarse)').matches||/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const N=MOB?192:384,SH=Math.round(176*N/384),CELL=F/N;
+const shoreJS=x=>-10+3.5*Math.sin(x*.09+1)+1.5*Math.sin(x*.23);
+const ss=(a,b,x)=>{const t=Math.max(0,Math.min(1,(x-a)/(b-a)));return t*t*(3-2*t);};
+const bumpJS=(x,z)=>.55*Math.sin(x*.07+1.3)*Math.sin(z*.06+.4)+.4*Math.sin(x*.13+z*.11+2)+.22*Math.sin(x*.27-z*.23+.7)+.1*Math.sin(x*.61+z*.53)+.12*Math.sin(x*1.7+.5)*Math.sin(z*2.1);
+const terrJS=(x,z)=>{const d=shoreJS(x)-z;return (d>0?-(1-Math.exp(-d*.25))*3:0)+bumpJS(x,z)*(1-ss(-7,-1.5,d))*1.3;};
+function waveH(x,z,t){const d=shoreJS(x)-z,dp=Math.max(d>0?(1-Math.exp(-d*.25))*3-.03:0,0);
+const shoal=(1+.6*(1-ss(.3,2.5,dp)))*ss(0,.35,dp);let h=0;
+for(let i=0;i<(MOB?5:8);i++){const L=14*Math.pow(.6,i),k=6.2832/L,a=.5+Math.sin(i*2.3+1)*.9;
+const om=Math.sqrt(9.8*k*Math.tanh(k*Math.max(dp,.15)))*.8;
+h+=L*.011*shoal*Math.exp(Math.sin((Math.cos(a)*x+Math.sin(a)*z)*k+t*om+i*1.7)-1);}
+return h;}
+const renderer=new T.WebGLRenderer({antialias:!MOB,powerPreference:"high-performance"});
+let PRbase=MOB?Math.min(devicePixelRatio,1.1):Math.min(devicePixelRatio,1.5);renderer.setPixelRatio(PRbase);
+renderer.setSize(innerWidth,innerHeight);
+document.body.prepend(renderer.domElement);
+const scene=new T.Scene();
+const camera=new T.PerspectiveCamera(70,innerWidth/innerHeight,.1,4000);
+const sunDir=new T.Vector3(.25,.3,-.92).normalize();
+const U={time:{value:0},sunDir:{value:sunDir},uw:{value:0}};
+
+const COMMON=`#define OCT ${MOB?3:4}
+#define WAVES ${MOB?5:8}
+#define WMUL ${MOB?"1.5":"1.0"}
+uniform vec3 sunDir;uniform float time;uniform float uw;
+float h21(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
+float vn(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
+return mix(mix(h21(i),h21(i+vec2(1,0)),f.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x),f.y);}
+float fbm(vec2 p){float a=.5,s=0.;for(int i=0;i<OCT;i++){s+=a*vn(p);p=p*2.03+7.1;a*=.5;}return s;}
+float shoreZ(float x){return -10.+3.5*sin(x*.09+1.)+1.5*sin(x*.23);}
+float cs(vec2 p){p=p*.02+vec2(time*.5,time*.2);return smoothstep(.45,.75,vn(p)*.65+vn(p*2.3+4.)*.35)*.55;}
+vec3 skyCol(vec3 d){float h=max(d.y,0.);
+vec3 c=mix(vec3(.74,.86,.97),vec3(.14,.38,.82),pow(h,.45));
+float s=max(dot(d,sunDir),0.);
+c+=vec3(1.,.78,.5)*pow(s,6.)*.55+vec3(1.,.92,.75)*pow(s,48.)*.9;return c;}
+vec3 skyFull(vec3 d){
+vec3 c=skyCol(d);float s=dot(d,sunDir);
+c+=smoothstep(.99965,.9999,s)*vec3(6.);
+float ang=atan(d.x,-d.z);
+float rd=(.004+.05*vn(vec2(ang*5.,2.))+.02*vn(vec2(ang*17.,7.)))*smoothstep(-.3,.7,sin(ang+2.4));
+if(d.y<rd&&d.y>-.2)c=mix(vec3(.40,.53,.70),skyCol(normalize(vec3(d.x,.02,d.z))),.45);
+if(d.y>0.){
+vec2 p=d.xz/(d.y*.9+.1)*.38+vec2(time*.012,time*.005);
+vec2 w=vec2(fbm(p*.7+time*.02),fbm(p*.7-time*.017+9.))*.9;
+float n=fbm(p*1.3+w),ns=fbm((p+sunDir.xz*.06)*1.3+w);
+float cover=.5+.1*sin(time*.03)+.05*sin(time*.071);
+float cl=smoothstep(cover,cover+.25,n)*smoothstep(0.,.12,d.y);
+float lit=clamp(1.-(ns-n)*4.,0.,1.);
+vec3 cc=mix(vec3(.66,.72,.82),vec3(1.),lit);
+cc+=vec3(1.,.9,.7)*pow(max(s,0.),5.)*(1.-cl)*.6;
+c=mix(c,cc,cl*.96);}
+return c;}
+float bump(vec2 p){return .55*sin(p.x*.07+1.3)*sin(p.y*.06+.4)+.4*sin(p.x*.13+p.y*.11+2.)+.22*sin(p.x*.27-p.y*.23+.7)+.1*sin(p.x*.61+p.y*.53)+.12*sin(p.x*1.7+.5)*sin(p.y*2.1);}
+float terr(vec2 p){float d=shoreZ(p.x)-p.y;float b=d>0.?-(1.-exp(-d*.25))*3.:0.;return b+bump(p)*(1.-smoothstep(-7.,-1.5,d))*1.3;}
+vec3 applyFog(vec3 col,vec3 wp){vec3 v=wp-cameraPosition;float d=length(v);
+if(uw>.5){float cd=max(-.03-cameraPosition.y,0.);vec3 Tr=exp(-vec3(.32,.07,.04)*d);vec3 sc=vec3(.02,.30,.34)*(.35+.65*sunDir.y)*exp(-cd*.12);return col*Tr+sc*(1.-exp(-d*.16));}
+vec3 dir=normalize(vec3(v.x,.03,v.z));
+return mix(col,skyCol(dir),1.-exp(-d*d*.00018));}
+`;
+
+// ---------- sky ----------
+const sky=new T.Mesh(new T.SphereGeometry(500,32,16),new T.ShaderMaterial({
+side:T.BackSide,depthWrite:false,uniforms:U,
+vertexShader:`varying vec3 vD;void main(){vD=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+fragmentShader:COMMON+`varying vec3 vD;void main(){gl_FragColor=vec4(skyFull(normalize(vD)),1.);}`}));
+sky.renderOrder=-1;scene.add(sky);
+
+// ---------- ground with shore ----------
+const ground=new T.Mesh(new T.PlaneGeometry(300,300,MOB?150:300,MOB?150:300),new T.ShaderMaterial({uniforms:U,
+vertexShader:COMMON+`varying vec3 vW;void main(){vec4 w=modelMatrix*vec4(position,1.);
+w.y=terr(w.xz);vW=w.xyz;gl_Position=projectionMatrix*viewMatrix*w;}`,
+fragmentShader:COMMON+`varying vec3 vW;void main(){
+float d=shoreZ(vW.x)-vW.z;
+float n=fbm(vW.xz*.3),n2=fbm(vW.xz*.9);
+vec3 c=mix(vec3(.10,.17,.05),vec3(.2,.28,.08),n);
+c=mix(c,mix(vec3(.12,.10,.05),vec3(.22,.17,.08),n2),smoothstep(.5,.75,fbm(vW.xz*.11)));
+c=mix(c,mix(vec3(.66,.58,.40),vec3(.56,.48,.33),n2),smoothstep(-6.,-.5,d));
+c*=1.-.45*smoothstep(-1.2,.15,d);
+float depth=max((1.-exp(-max(d,0.)*.25))*3.-.03,0.);
+if(d>0.){vec2 q=vW.xz*1.4;float a=vn(q+vec2(time*.3,time*.2)),b=vn(q*1.3-vec2(time*.25,-time*.3)+5.);
+c+=vec3(.6,.85,.75)*pow(clamp(1.-abs(a-b)*2.5,0.,1.),6.)*(.4+.7*uw)*exp(-depth*.9);}
+vec2 e2=vec2(.5,0.);float h0=terr(vW.xz);vec3 tn=normalize(vec3(h0-terr(vW.xz+e2),.5,h0-terr(vW.xz+e2.yx)));c*=clamp(.5+.9*dot(tn,sunDir),.25,1.25);c*=1.-cs(vW.xz);
+gl_FragColor=vec4(applyFog(c,vW),1.);}`}));
+ground.rotation.x=-Math.PI/2;scene.add(ground);
+
+// ---------- water simulation (wave equation) ----------
+let H=new Float32Array(N*SH),HP=new Float32Array(N*SH);
+const C=new Float32Array(N*SH),D=new Float32Array(N*SH),simData=new Float32Array(N*SH*4);
+for(let z=0;z<SH;z++)for(let x=0;x<N;x++){
+const wx=(x+.5)*CELL-F/2,wz=(z+.5)*CELL-F/2,d=shoreJS(wx)-wz;
+const dep=d>0?(1-Math.exp(-d*.25))*3-.03:0;
+C[z*N+x]=dep>.05?.06+.28*Math.min(1,dep/2):0;D[z*N+x]=dep>.05?.9965-.05*(1-ss(.05,1.2,dep)):0;}
+const simTex=new T.DataTexture(simData,N,SH,T.RGBAFormat,T.FloatType);
+simTex.minFilter=simTex.magFilter=T.NearestFilter;simTex.needsUpdate=true;
+function simStep(){
+for(let z=1;z<SH-1;z++){const r=z*N;for(let x=1;x<N-1;x++){const i=r+x,c=C[i];
+if(c===0){HP[i]=0;continue;}
+const lap=H[i-1]+H[i+1]+H[i-N]+H[i+N]-4*H[i];
+HP[i]=(2*H[i]-HP[i]+c*lap)*D[i];}}
+const t=H;H=HP;HP=t;}
+function simPack(){
+const k=1/(2*CELL);
+for(let z=1;z<SH-1;z++)for(let x=1;x<N-1;x++){const i=z*N+x,j=i*4;
+simData[j]=(H[i+1]-H[i-1])*k;simData[j+1]=(H[i+N]-H[i-N])*k;simData[j+2]=H[i];}
+simTex.needsUpdate=true;}
+function splash(x,z,amt,rad){
+const cx=(x+F/2)/CELL,cz=(z+F/2)/CELL,rc=Math.ceil(rad/CELL);
+for(let zz=Math.floor(cz)-rc;zz<=cz+rc;zz++)for(let xx=Math.floor(cx)-rc;xx<=cx+rc;xx++){
+if(xx<1||zz<1||xx>=N-1||zz>=SH-1)continue;const i=zz*N+xx;if(!C[i])continue;
+const k=Math.max(0,1-Math.hypot(xx+.5-cx,zz+.5-cz)*CELL/rad);H[i]-=amt*k*k;}}
+
+// ---------- water surface ----------
+const wu={...U,sim:{value:simTex},F:{value:F},cell:{value:CELL},ss:{value:new T.Vector2(N,SH)}};
+const water=new T.Mesh(new T.PlaneGeometry(6000,6000),new T.ShaderMaterial({uniforms:wu,transparent:true,depthWrite:false,
+vertexShader:`varying vec3 vW;void main(){vec4 w=modelMatrix*vec4(position,1.);vW=w.xyz;gl_Position=projectionMatrix*viewMatrix*w;}`,
+fragmentShader:COMMON+`uniform sampler2D sim;uniform vec2 ss;uniform float F,cell;varying vec3 vW;
+vec4 simAt(vec2 xz){vec2 p=(xz+F*.5)/cell-.5;vec2 i=floor(p),f=fract(p);
+vec4 a=texture2D(sim,(i+.5)/ss),b=texture2D(sim,(i+vec2(1.5,.5))/ss),c=texture2D(sim,(i+vec2(.5,1.5))/ss),d=texture2D(sim,(i+1.5)/ss);
+return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);}
+void main(){
+vec3 V=cameraPosition-vW;float dist=length(V);V/=dist;
+float d=shoreZ(vW.x)-vW.z;
+float depth=max((1.-exp(-max(d,0.)*.25))*3.-.03,0.);
+vec2 g=vec2(0.);float hgt=0.;
+float shoal=(1.+.6*(1.-smoothstep(.3,2.5,depth)))*smoothstep(0.,.35,depth);
+for(int i=0;i<WAVES;i++){float fi=float(i);float L=14.*pow(.6,fi);float k=6.2832/L;
+float a=.5+sin(fi*2.3+1.)*.9;vec2 dr=vec2(cos(a),sin(a));
+float ph=dot(dr,vW.xz)*k+time*sqrt(9.8*k*tanh(k*max(depth,.15)))*.8+fi*1.7;
+float amp=L*.011*shoal*clamp(L*30./(dist+1.),0.,1.);
+float e=exp(sin(ph)-1.);hgt+=amp*e;g+=dr*amp*k*e*cos(ph);}
+
+vec2 q=vW.xz*2.5+vec2(time*.5,time*.3);float c0=vn(q);
+vec2 dn=vec2(vn(q+vec2(.05,0.))-c0,vn(q+vec2(0.,.05))-c0)*20.;
+q=vW.xz*7.+vec2(-time*.7,time*.5);c0=vn(q);
+dn+=vec2(vn(q+vec2(.05,0.))-c0,vn(q+vec2(0.,.05))-c0)*10.;
+g+=dn*.06*clamp(60./(dist+1.),0.,1.);
+float m=step(-F*.5+.4,vW.x)*step(vW.x,F*.5-.4)*step(-F*.5+.4,vW.z)*step(vW.z,-F*.5+ss.y*cell-.4);
+vec4 s=simAt(vW.xz)*m;g+=s.xy*6.;hgt+=s.z;
+vec3 n=normalize(vec3(-g.x,1.,-g.y));
+if(uw>.5){vec3 I=-V;vec3 rf=refract(I,-n,1.33);
+vec3 uc=vec3(0.,.2,.3)*(.6+.6*sunDir.y);
+float win=smoothstep(.62,.72,dot(I,n));
+vec3 oc=mix(uc*1.4,skyFull(normalize(rf+vec3(0.,1e-4,0.)))*vec3(.75,.92,.95),win);
+oc=mix(oc,uc,1.-exp(-dist*.04));
+oc*=.85+.3*vn(vW.xz*.7+time*.35);gl_FragColor=vec4(oc,smoothstep(0.,.03,depth));return;}
+float fres=.02+.98*pow(1.-max(dot(n,V),0.),5.);
+vec3 R=reflect(-V,n);R.y=abs(R.y);R=normalize(R);
+vec3 refl=skyFull(R);
+float dc=1.-exp(-depth*.9);
+float sss=clamp(hgt*3.+.5,0.,1.);
+vec3 body=mix(vec3(.12,.5,.5),vec3(0.,.09,.2),dc);
+body=mix(body,vec3(0.,.42,.52),sss*.45*dc);
+body*=.55+.5*clamp(dot(n,sunDir)*.5+.5,0.,1.);
+float sr=max(dot(R,sunDir),0.);
+vec3 spark=vec3(1.,.9,.7)*(pow(sr,400.)*18.+pow(sr,40.)*.35)*(.3+.7*fres);
+vec3 col=body*(1.-fres)+refl*fres+spark;
+float nz=fbm(vW.xz*3.+time*.1);
+float foam=smoothstep(.45,0.,depth)*smoothstep(.35,.7,nz+.25*sin(depth*30.-time*2.5+nz*6.));
+foam=clamp(foam+smoothstep(.03,.09,abs(s.z))*.5*nz+smoothstep(.28,.5,length(g))*(1.-smoothstep(0.,1.6,depth))*smoothstep(.3,.7,nz)*.8+smoothstep(.55,.9,length(g))*.5*nz,0.,1.);
+col=mix(col,vec3(.95,.97,1.)*(.65+.35*sunDir.y),foam*.85);
+float al=max(clamp(max(fres,1.-exp(-depth*2.2)),0.,1.),foam)*smoothstep(0.,.03,depth);
+col=mix(col,skyCol(normalize(vec3(-V.x,.02,-V.z))),1.-exp(-dist*dist*.0000025));
+gl_FragColor=vec4(col,al);}`}));
+water.rotation.x=-Math.PI/2;water.position.set(0,-.03,0);scene.add(water);
+
+// ---------- trample map ----------
+const R=new Float32Array(N*N),A=new Float32Array(N*N),DX=new Float32Array(N*N),DZ=new Float32Array(N*N);
+const bytes=new Uint8Array(N*N*4);
+const tex=new T.DataTexture(bytes,N,N,T.RGBAFormat);
+tex.minFilter=tex.magFilter=T.LinearFilter;tex.needsUpdate=true;
+
+// ---------- grass ----------
+const levels=MOB?3:4,verts=[],idx=[];
+for(let i=0;i<levels;i++){const t=i/levels,w=.5*(1-t*.8);verts.push(-w,t,0,w,t,0);}
+verts.push(0,1,0);
+for(let i=0;i<levels-1;i++){const a=i*2;idx.push(a,a+1,a+2,a+1,a+3,a+2);}
+{const a=(levels-1)*2;idx.push(a,a+1,levels*2);}
+const g=new T.InstancedBufferGeometry();
+g.setAttribute('position',new T.Float32BufferAttribute(verts,3));g.setIndex(idx);
+const COUNT=MOB?90000:260000,off=new Float32Array(COUNT*3),rnd=new Float32Array(COUNT*3);
+for(let n=0;n<COUNT;){const x=(Math.random()-.5)*F,z=(Math.random()-.5)*F,ds=z-shoreJS(x);
+if(ds<1||(ds<8&&Math.random()>(ds-1)/7))continue;
+off[n*3]=x;off[n*3+1]=z;rnd[n*3]=Math.random();rnd[n*3+1]=Math.random();rnd[n*3+2]=Math.random();n++;}
+g.setAttribute('off',new T.InstancedBufferAttribute(off,3));
+g.setAttribute('rnd',new T.InstancedBufferAttribute(rnd,3));
+g.instanceCount=COUNT;
+const gu={...U,map:{value:tex},player:{value:new T.Vector3()},F:{value:F}};
+const grass=new T.Mesh(g,new T.ShaderMaterial({uniforms:gu,side:T.DoubleSide,
+vertexShader:COMMON+`attribute vec3 off;attribute vec3 rnd;uniform sampler2D map;uniform vec3 player;uniform float F;
+varying float vT;varying float vR;varying float vTr;varying float vCl;varying float vX;varying float vP;varying float vTL;
+varying vec3 vW;varying vec3 vN;
+vec3 bp(float t,float sx,float wid,float yaw,float tw,float height,vec2 tb,float fl){
+float ya=yaw+t*tw;
+vec3 p=vec3(sx*wid*cos(ya),0.,-sx*wid*sin(ya));
+float len=t*height;vec2 b=tb*t*t;float hb=length(b);
+p.y=sqrt(max(len*len-.8*hb*hb,.12*len*len))*(1.-.6*fl*t);
+p.xz+=b;return p;}
+void main(){
+float t=position.y;
+vec4 tr=texture2D(map,off.xy/F+.5);
+float amt=tr.r;vec2 pd=tr.gb*2.-1.;
+vec2 dp=off.xy-player.xz;float dist=length(dp);
+float live=smoothstep(1.3,.1,dist);
+float pat=vn(off.xy*.04)*.65+vn(off.xy*.13+3.)*.35;
+float height=(.4+rnd.x*.7)*(.65+.8*pat);
+height*=mix(1.,.18,tr.a*step(.35,rnd.y));
+float yaw=rnd.z*6.2832,tw=(rnd.y-.5)*1.6;
+float wid=(.09+rnd.y*.06)*(.8+.4*pat)*WMUL;
+float wnd=sin(time*1.3+off.x*.13+off.y*.09)*.4+sin(time*2.7+off.x*.5+off.y*.4)*.2+(vn(off.xy*.07+vec2(time*.7,time*.25))-.5)*2.4+.3;
+float fl=max(amt*.9,live);
+vec2 pdir=mix(normalize(dp+vec2(.001)),pd,smoothstep(.2,.8,amt)*step(.01,amt));
+vec2 tb=normalize(vec2(1.,.4))*(wnd*.3+sin(time*6.+rnd.x*30.+off.x)*.03)*height;
+tb+=vec2(sin(yaw),cos(yaw))*height*.3*(.3+rnd.x);
+tb+=pdir*fl*height*1.1;
+vec3 a=bp(max(t-.06,0.),0.,wid,yaw,tw,height,tb,fl);
+vec3 b=bp(min(t+.06,1.),0.,wid,yaw,tw,height,tb,fl);
+vec3 tang=normalize(b-a+vec3(0.,1e-4,0.));
+float ya=yaw+t*tw;vec3 wd=vec3(cos(ya),0.,-sin(ya));
+float sx=position.x/max(.5*(1.-t*.8),.05);
+vec3 nn=normalize(cross(wd,tang));
+vN=normalize(nn+wd*sx*.9);
+vec3 p=bp(t,position.x,wid,yaw,tw,height,tb,fl);
+p.xz+=off.xy;float gy=terr(off.xy);vec2 gr=vec2(terr(off.xy+vec2(.5,0.))-gy,terr(off.xy+vec2(0.,.5))-gy)*2.;p.y+=gy;vTL=clamp(.5+.9*dot(normalize(vec3(-gr.x,1.,-gr.y)),sunDir),.25,1.25);
+vT=t;vR=rnd.x;vTr=fl;vX=sx;vP=pat;vCl=cs(off.xy);vW=p;
+gl_Position=projectionMatrix*viewMatrix*vec4(p,1.);}`,
+fragmentShader:COMMON+`varying float vT;varying float vR;varying float vTr;varying float vCl;varying float vX;varying float vP;varying float vTL;
+varying vec3 vW;varying vec3 vN;
+void main(){
+vec3 base=mix(vec3(.04,.10,.02),vec3(.13,.28,.04),vR);
+vec3 tip=mix(vec3(.34,.50,.09),vec3(.60,.64,.17),vR);
+vec3 c=mix(base,tip,pow(vT,.8));
+c=mix(c,vec3(.55,.47,.20)*(.6+.4*vT),smoothstep(.45,.25,vP)*.7);
+vec3 L=sunDir,vd=normalize(vW-cameraPosition),n=normalize(vN);
+float sh=1.-vCl*.55;
+float diff=(.45+.55*abs(dot(n,L)))*sh;
+c*=diff*mix(.25,1.,pow(vT,.7));
+c*=1.-.22*exp(-vX*vX*30.);
+c*=1.-vTr*.25;c*=vTL;
+float back=pow(max(dot(vd,L),0.),3.);
+c+=vec3(.5,.58,.1)*back*vT*.9*sh;
+vec3 hv=normalize(L-vd);
+c+=vec3(1.,.95,.8)*pow(abs(dot(n,hv)),60.)*.25*vT*sh;
+gl_FragColor=vec4(applyFog(c,vW),1.);}`}));
+grass.frustumCulled=false;scene.add(grass);
+
+// ---------- player ----------
+const P=new T.Vector3(0,1.55,F*.22);let cool=0,swimS=0,wadeS=0,surfS=-.03,underS=0,tUnder=0,exitT=99,wetV=0,bi=0;let yaw=0,pitch=.1,locked=false,drag=false,bob=0,lastSg=true,acc=0,ey=1.55,vy=0,wasW=false,wasUW=false,kick=0,uwA=0;
+const keys={};
+addEventListener('keydown',e=>{keys[e.code]=true;document.getElementById('hint').style.opacity=0;});
+addEventListener('keyup',e=>keys[e.code]=false);
+if(!MOB)renderer.domElement.addEventListener('click',()=>{try{renderer.domElement.requestPointerLock()}catch(e){}});
+document.addEventListener('pointerlockchange',()=>locked=document.pointerLockElement===renderer.domElement);
+addEventListener('mousedown',()=>drag=true);addEventListener('mouseup',()=>drag=false);
+addEventListener('mousemove',e=>{if(locked||drag){yaw-=e.movementX*.0025;pitch=Math.max(-1.3,Math.min(1.3,pitch-e.movementY*.0025));}});
+addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();resizeRT();});
+
+// ---------- glare ----------
+const glare=document.getElementById('glare'),wash=document.getElementById('wash');
+const ghosts=[0,1,2].map(i=>{const d=document.createElement('div');d.className='ghost';
+const s=[90,50,160][i];d.style.width=d.style.height=s+'px';
+d.style.background=['radial-gradient(#ffd27a,transparent 70%)','radial-gradient(#9fd0ff,transparent 70%)','radial-gradient(#fff3c8,transparent 70%)'][i];
+if(MOB)d.style.display="none";document.body.appendChild(d);return d;});
+
+function stepTrample(dt,speed){
+const dec=dt*.05,dec2=dt*.012;
+for(let i=0;i<N*N;i++){if(R[i]>0)R[i]=Math.max(0,R[i]-dec);if(A[i]>0)A[i]=Math.max(0,A[i]-dec2);}
+const cell=F/N,rad=1.15,cx=(P.x/F+.5)*N,cz=(P.z/F+.5)*N,rc=Math.ceil(rad/cell)+1;
+for(let z=Math.floor(cz)-rc;z<=cz+rc;z++)for(let x=Math.floor(cx)-rc;x<=cx+rc;x++){
+if(x<0||z<0||x>=N||z>=N)continue;
+const wx=(x+.5)*cell-F/2-P.x,wz=(z+.5)*cell-F/2-P.z,d=Math.hypot(wx,wz);
+if(d>rad)continue;const i=z*N+x,a=Math.min(1,(1-d/rad)*1.5);
+if(a>R[i]){R[i]=a;DX[i]=wx/(d+.001);DZ[i]=wz/(d+.001);}
+if(d<.45&&speed>.5)A[i]=Math.min(1,A[i]+dt*(speed>4?2.2:.9));}
+for(let i=0;i<N*N;i++){const j=i*4;bytes[j]=R[i]*255;bytes[j+1]=(DX[i]*.5+.5)*255;bytes[j+2]=(DZ[i]*.5+.5)*255;bytes[j+3]=A[i]>.5?255:A[i]*400;}
+tex.needsUpdate=true;}
+
+
+const camW=new T.Vector3();const PXU={value:700};
+const RTC=T.WebGLMultisampleRenderTarget||T.WebGLRenderTarget;
+const rt=new RTC(innerWidth,innerHeight,{format:T.RGBAFormat});
+rt.texture.minFilter=rt.texture.magFilter=T.LinearFilter;if(MOB)rt.samples=2;
+function resizeRT(){const z=renderer.getDrawingBufferSize(new T.Vector2());rt.setSize(z.x,z.y);PXU.value=z.y/(2*Math.tan(35*Math.PI/180));}
+resizeRT();
+const POST=`#define TAPS ${MOB?6:12}
+#define RAYS ${MOB?8:16}
+uniform sampler2D tS;uniform float time,asp,wet,exitT,uwA,camDepth,rayK;uniform vec2 sunUV;varying vec2 vUv;
+float h21(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
+float vn(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
+return mix(mix(h21(i),h21(i+vec2(1,0)),f.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x),f.y);}
+vec3 samp(vec2 uv,float r){
+if(r<.0006)return texture2D(tS,uv).rgb;
+vec3 c=vec3(0.);
+for(int i=0;i<TAPS;i++){float a=float(i)*2.39996;float rr=sqrt((float(i)+.5)/float(TAPS))*r;
+c+=texture2D(tS,uv+vec2(cos(a)/asp,sin(a))*rr).rgb;}
+return c/float(TAPS);}
+vec4 beads(vec2 p,float S,float amount,float seed){
+vec2 g=p*S,id=floor(g),f=fract(g)-.5;
+float r1=h21(id+seed),r2=h21(id+seed+7.1),r3=h21(id+seed+13.7),r4=h21(id+seed+31.3);
+float s=smoothstep(r1,r1+.12,amount);
+if(s<=0.)return vec4(0.);
+vec2 d=f-(vec2(r2,r3)-.5)*.5;
+float R=(.08+.14*r4)*s;float q=length(d)/R;
+if(q>=1.)return vec4(0.);
+vec3 N=normalize(vec3(d/R,sqrt(1.-q*q)));
+float spec=pow(max(dot(N,normalize(vec3(-.45,.55,.7))),0.),48.);
+vec2 o=-d*1.7/S;o.x/=asp;
+return vec4(o,1.,spec*1.1-smoothstep(.72,1.,q)*.45);}
+vec4 slide(vec2 p,float t,float amount){
+float cols=9.;float cx=floor(p.x*cols);
+float cr=h21(vec2(cx,3.1));
+float tt=t*(.05+.07*h21(vec2(cx,5.7)))+cr*10.;
+float cyc=floor(tt),ph=fract(tt);
+if(h21(vec2(cx,cyc)+9.)>amount*1.1)return vec4(0.);
+float xo=(h21(vec2(cx,cyc)+21.)-.5)*.5+.5;
+float dxp=(p.x*cols-cx-xo)/cols;
+float ph2=ph+.03*sin(ph*37.+cr*6.);
+float y=1.1-ph2*1.3;
+float r=.011+.01*h21(vec2(cx,cyc)+3.);
+vec2 dd=vec2(dxp,p.y-y);
+vec2 e=vec2(dd.x,dd.y*.8)/r;float q=length(e);
+if(q<1.){vec3 N=normalize(vec3(e,sqrt(1.-q*q)));
+float spec=pow(max(dot(N,normalize(vec3(-.45,.55,.7))),0.),48.);
+vec2 o=-dd*1.6;o.x/=asp;
+return vec4(o,1.,spec*1.1-smoothstep(.72,1.,q)*.45);}
+float tw=r*.4;
+float m=step(0.,dd.y)*(1.-smoothstep(0.,.4,dd.y))*(1.-smoothstep(tw*.3,tw,abs(dd.x)));
+return vec4(-vec2(dd.x/tw*.003/asp,0.)*m,m*.6,-m*.08);}
+float film(vec2 p,float ex){
+float lv=1.3-ex*.8;
+float e=lv+(vn(vec2(p.x*9.,1.))-.5)*.5+(vn(vec2(p.x*37.,2.))-.5)*.14;
+return (1.-smoothstep(e-.15,e+.05,p.y))*(1.-smoothstep(1.4,2.4,ex));}
+void main(){
+vec2 uv=vUv,p=vec2(uv.x*asp,uv.y);vec2 off=vec2(0.);float blur=0.,shade=0.;
+off+=uwA*vec2(sin(uv.y*18.+time*1.3)+.5*sin(uv.y*43.-time*.9),cos(uv.x*14.+time*1.1)+.5*sin(uv.x*37.+time*1.6))*.0022;
+blur+=.0012*uwA;
+float wA=wet*(1.-uwA);
+if(wA>.01||exitT<3.){
+vec4 a=beads(p,6.,wA*.5,0.),b=beads(p,13.,wA*.75,9.),c=beads(p,28.,wA*.95,23.),s=slide(p,time,wA);
+off+=a.xy+b.xy+c.xy+s.xy;shade+=a.w+b.w+c.w+s.w;
+float m=max(max(a.z,b.z),max(c.z,s.z));
+blur+=m*.0035+wA*.0025;
+float fl=film(p,exitT)*(1.-uwA);
+off+=fl*vec2(sin(p.y*38.+time*2.5+vn(p*5.)*6.),cos(p.x*28.-time*1.8))*.0065;
+off.y-=fl*.006;blur+=fl*.007;shade+=fl*.04;}
+vec3 col=samp(uv+off,blur);
+col*=1.+min(shade,0.)*.7;col+=max(shade,0.)*vec3(1.,.97,.92)*.65;
+if(uwA>.01){
+vec2 dir=sunUV-uv;float acc=0.;
+for(int i=0;i<RAYS;i++){float f=(float(i)+.5)/float(RAYS);vec3 sc=texture2D(tS,uv+dir*f*.85).rgb;acc+=max(dot(sc,vec3(.33))-.5,0.)*(1.-f);}
+float ang=atan(dir.y,dir.x*asp);
+float pat=.35+1.8*vn(vec2(ang*16.,time*.2))*vn(vec2(ang*5.+3.,time*.13+7.));
+col+=vec3(.30,.62,.62)*acc/float(RAYS)*pat*rayK*uwA*3.;
+float vg=1.-smoothstep(.2,1.05,length((uv-.5)*vec2(asp*.62,1.)));
+col*=mix(1.,.4+.6*vg,uwA);
+col*=mix(vec3(1.),exp(-vec3(.2,.05,.03)*camDepth),uwA);
+col=mix(col,vec3(dot(col,vec3(.3,.59,.11))),.12*uwA);}
+gl_FragColor=vec4(col,1.);}`;
+const pu={tS:{value:rt.texture},time:U.time,asp:{value:innerWidth/innerHeight},wet:{value:0},exitT:{value:99},uwA:{value:0},camDepth:{value:0},sunUV:{value:new T.Vector2(.5,.8)},rayK:{value:0}};
+const postScene=new T.Scene(),postCam=new T.OrthographicCamera(-1,1,1,-1,0,1);
+const quad=new T.Mesh(new T.PlaneGeometry(2,2),new T.ShaderMaterial({uniforms:pu,depthTest:false,depthWrite:false,
+vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.,1.);}`,fragmentShader:POST}));
+quad.frustumCulled=false;postScene.add(quad);
+// floating particles underwater (round, soft)
+const MN=MOB?250:700,mseed=new Float32Array(MN*3);for(let i=0;i<MN*3;i++)mseed[i]=Math.random();
+const mg=new T.BufferGeometry();mg.setAttribute('position',new T.BufferAttribute(new Float32Array(MN*3),3));mg.setAttribute('seed',new T.BufferAttribute(mseed,3));
+const mu={uwA:{value:0}};
+const motes=new T.Points(mg,new T.ShaderMaterial({transparent:true,depthWrite:false,blending:T.AdditiveBlending,uniforms:{time:U.time,uwA:mu.uwA,px:PXU,cam:{value:camW}},
+vertexShader:`attribute vec3 seed;uniform float time,uwA,px;uniform vec3 cam;varying float vA;
+void main(){vec3 L=vec3(26.,16.,26.);
+vec3 p=seed*L+vec3(sin(time*.2+seed.x*30.)*.4,-time*.05+sin(time*.3+seed.z*20.)*.25,time*.08);
+vec3 rel=mod(p-cam+L*.5,L)-L*.5;
+vec4 mv=viewMatrix*vec4(cam+rel,1.);gl_Position=projectionMatrix*mv;
+gl_PointSize=clamp((.012+.02*seed.y)*px/max(-mv.z,.1),1.,14.);
+vA=uwA*(.2+.6*seed.x)*(1.-smoothstep(8.,13.,length(rel)))*step(0.,-mv.z);}`,
+fragmentShader:`varying float vA;void main(){float d=length(gl_PointCoord-.5)*2.;if(d>1.)discard;gl_FragColor=vec4(vec3(.6,.9,.9),(1.-d)*(1.-d)*vA);}`}));
+motes.frustumCulled=false;scene.add(motes);
+// bubbles
+const BN=160,bp=new Float32Array(BN*3).fill(-999),bv=new Float32Array(BN),bs=new Float32Array(BN),bl=new Float32Array(BN);
+const bg=new T.BufferGeometry();bg.setAttribute('position',new T.BufferAttribute(bp,3));bg.setAttribute('size',new T.BufferAttribute(bs,1));
+const bubbles=new T.Points(bg,new T.ShaderMaterial({transparent:true,depthWrite:false,uniforms:{px:PXU},
+vertexShader:`attribute float size;uniform float px;void main(){vec4 mv=viewMatrix*vec4(position,1.);gl_Position=projectionMatrix*mv;gl_PointSize=clamp(size*px/max(-mv.z,.1),2.,80.);}`,
+fragmentShader:`void main(){vec2 c=gl_PointCoord-.5;float d=length(c)*2.;if(d>1.)discard;
+float ring=smoothstep(.55,.95,d);float hl=1.-smoothstep(0.,.28,length(c-vec2(-.17,-.17)));
+gl_FragColor=vec4(vec3(.8,.95,1.)*(ring*.9+hl*1.2+.05),clamp(ring*.55+hl*.8+.06,0.,1.)*(1.-smoothstep(.9,1.,d)));}`}));
+bubbles.frustumCulled=false;scene.add(bubbles);
+function burst(n){for(let k=0;k<n;k++){const i=bi++%BN,a=Math.random()*6.28,r=Math.random()*.4;
+bp[i*3]=P.x+Math.cos(a)*r;bp[i*3+1]=camW.y-.8+Math.random()*.9;bp[i*3+2]=P.z+Math.sin(a)*r;
+bv[i]=.5+Math.random()*.8;bs[i]=.012+Math.random()*.03;bl[i]=1;}}
+let qual=1,fpsT=0,fpsN=0;
+const touch={jx:0,jy:0,run:false,up:false,down:false};
+if(MOB){document.body.classList.add('touch');
+document.getElementById('hint').textContent='Левый палец — идти, правый — смотреть. Кнопки: подняться, бег, нырнуть.';
+const joy=document.getElementById('joy'),knob=document.getElementById('knob');
+let jid=null,lid=null,jx0=0,jy0=0,lx=0,ly=0;const RJ=55;
+document.addEventListener('touchstart',e=>{
+if(e.target.id==='vrBtn')return;
+for(const t of e.changedTouches){
+if(jid===null&&t.clientX<innerWidth*.5){jid=t.identifier;jx0=t.clientX;jy0=t.clientY;joy.style.display='block';joy.style.left=jx0-RJ+'px';joy.style.top=jy0-RJ+'px';knob.style.transform='translate(0,0)';}
+else if(lid===null){lid=t.identifier;lx=t.clientX;ly=t.clientY;}}
+document.getElementById('hint').style.opacity=0;e.preventDefault();},{passive:false});
+document.addEventListener('touchmove',e=>{
+for(const t of e.changedTouches){
+if(t.identifier===jid){let dx=t.clientX-jx0,dy=t.clientY-jy0;const d=Math.hypot(dx,dy);if(d>RJ){dx*=RJ/d;dy*=RJ/d;}
+touch.jx=dx/RJ;touch.jy=dy/RJ;knob.style.transform='translate('+dx+'px,'+dy+'px)';}
+else if(t.identifier===lid){yaw-=(t.clientX-lx)*.005;pitch=Math.max(-1.3,Math.min(1.3,pitch-(t.clientY-ly)*.005));lx=t.clientX;ly=t.clientY;}}
+e.preventDefault();},{passive:false});
+const endT=e=>{for(const t of e.changedTouches){
+if(t.identifier===jid){jid=null;touch.jx=touch.jy=0;joy.style.display='none';}
+if(t.identifier===lid)lid=null;}};
+document.addEventListener('touchend',endT);document.addEventListener('touchcancel',endT);
+const hold=(id,k)=>{const b=document.getElementById(id);
+b.addEventListener('touchstart',e=>{touch[k]=true;e.stopPropagation();e.preventDefault();},{passive:false});
+const off=e=>{touch[k]=false;e.stopPropagation();};b.addEventListener('touchend',off);b.addEventListener('touchcancel',off);};
+hold('bUp','up');hold('bDn','down');
+document.getElementById('bRun').addEventListener('touchstart',e=>{touch.run=!touch.run;e.currentTarget.classList.toggle('on',touch.run);e.stopPropagation();e.preventDefault();},{passive:false});}
+const rig=new T.Group();scene.add(rig);rig.add(camera);
+let vrS=1,inVR=false,snapLatch=false;
+function applyQ(){g.instanceCount=Math.floor(COUNT*qual*vrS);}
+renderer.xr.enabled=true;renderer.xr.setReferenceSpaceType('local');
+renderer.xr.setFramebufferScaleFactor(MOB?.8:1);
+const vrBtn=document.getElementById('vrBtn');
+if(navigator.xr){
+navigator.xr.isSessionSupported('immersive-vr').then(ok=>{vrBtn.style.display='block';
+if(!ok){vrBtn.textContent='VR недоступен';vrBtn.disabled=true;vrBtn.style.opacity=.6;}}).catch(()=>{});
+vrBtn.addEventListener('click',async()=>{
+try{const ses=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor']});
+await renderer.xr.setSession(ses);inVR=true;vrS=.55;applyQ();
+if(renderer.xr.setFoveation)renderer.xr.setFoveation(1);
+document.getElementById('hint').style.opacity=0;
+ses.addEventListener('end',()=>{inVR=false;vrS=1;applyQ();touch.run=touch.up=touch.down=false;touch.jx=touch.jy=0;
+rig.position.set(0,0,0);rig.rotation.set(0,0,0);resizeRT();});
+}catch(e){vrBtn.textContent='VR: '+String(e.message||'ошибка').slice(0,28);}});}
+const clock=new T.Clock();let tm=0;
+function frame(){
+const dt=Math.min(clock.getDelta(),.05);tm+=dt;U.time.value=tm;
+if(inVR){const ses=renderer.xr.getSession();if(ses){let jx=0,jy=0,up=false,dn=false,rn=false;
+for(const src of ses.inputSources){const gp=src.gamepad;if(!gp)continue;
+const ax=gp.axes,b=gp.buttons,x=ax.length>2?ax[2]:ax[0],y=ax.length>3?ax[3]:ax[1];
+if(src.handedness==='left'){jx=x;jy=y;rn=!!(b[1]&&b[1].pressed);}
+else if(src.handedness==='right'){
+if(Math.abs(x)>.7){if(!snapLatch){yaw-=Math.sign(x)*Math.PI/6;snapLatch=true;}}else if(Math.abs(x)<.3)snapLatch=false;
+up=!!(b[4]&&b[4].pressed);dn=!!(b[5]&&b[5].pressed);}}
+touch.jx=Math.abs(jx)>.15?jx:0;touch.jy=Math.abs(jy)>.15?jy:0;touch.up=up;touch.down=dn;touch.run=rn;}}
+fpsT+=dt;fpsN++;
+if(fpsT>1.5){const fps=fpsN/fpsT;fpsT=0;fpsN=0;
+if(tm>4){let nq=qual;if(fps<(inVR?60:30)&&qual>.35)nq=qual-.15;else if(fps>(inVR?68:56)&&qual<1)nq=Math.min(1,qual+.05);
+if(Math.abs(nq-qual)>.001){qual=nq;applyQ();
+const npr=PRbase*(qual<.6?.75:1);
+if(!inVR&&Math.abs(npr-renderer.getPixelRatio())>.01){renderer.setPixelRatio(npr);renderer.setSize(innerWidth,innerHeight);resizeRT();}}}}
+if(keys.ArrowLeft)yaw+=dt*1.8;if(keys.ArrowRight)yaw-=dt*1.8;
+if(keys.ArrowUp)pitch=Math.min(1.3,pitch+dt*1.4);if(keys.ArrowDown)pitch=Math.max(-1.3,pitch-dt*1.4);
+const surf0=-.03+waveH(P.x,P.z,tm);
+const dep0=Math.max(surf0-terrJS(P.x,P.z),0);
+let sp=(keys.ShiftLeft||keys.ShiftRight||touch.run)?5.2:2.4;
+sp*=dep0>1.25?.6:1-.45*Math.min(1,dep0/1.1);
+let fx=0,fz=0;
+if(keys.KeyW)fz-=1;if(keys.KeyS)fz+=1;if(keys.KeyA)fx-=1;if(keys.KeyD)fx+=1;
+fx+=touch.jx;fz+=touch.jy;const l=Math.max(1,Math.hypot(fx,fz));fx/=l;fz/=l;
+const hY=inVR?new T.Euler().setFromQuaternion(camera.quaternion,'YXZ').y:0;const my=yaw+hY;const c=Math.cos(my),s=Math.sin(my);
+const mx=(fx*c+fz*s)*sp,mz=(-fx*s+fz*c)*sp,spd=Math.hypot(mx,mz);
+P.x=Math.max(-F/2+3,Math.min(F/2-3,P.x+mx*dt));P.z=Math.max(-F/2+3,Math.min(F/2-3,P.z+mz*dt));
+// vertical: terrain / wading / swimming / diving
+const gy=terrJS(P.x,P.z),zi=Math.floor((P.z+F/2)/CELL),xi=Math.floor((P.x+F/2)/CELL);
+const sH=(zi>=1&&zi<SH-1&&xi>=1&&xi<N-1)?H[zi*N+xi]:0;
+surfS+=(-.03+waveH(P.x,P.z,tm)-surfS)*Math.min(1,dt*3);const surf=surfS,depW=Math.max(surf-gy,0);if(!swimS&&depW>1.35)swimS=1;else if(swimS&&depW<1.15)swimS=0;const swim=!!swimS,gEye=gy+1.55;
+if(swim){if(keys.Space||touch.up)vy+=9*dt;if(keys.KeyC||touch.down)vy-=7*dt;if(ey>gEye)vy-=2.5*dt;
+vy*=Math.exp(-2.2*dt);ey+=vy*dt;
+if(ey<gEye){ey=gEye;vy=Math.max(vy,0);}if(ey>surf+.35){ey=surf+.35;vy=Math.min(vy,0);}}
+else{ey+=(gEye-ey)*Math.min(1,dt*10);vy=0;}
+if(!wadeS&&depW>.1)wadeS=1;else if(wadeS&&depW<.03)wadeS=0;const subm=!!underS,inW=!!wadeS;
+// camera shake
+bob+=spd*dt*2;
+const sg=Math.sin(bob)>0;
+if(sg!==lastSg){lastSg=sg;if(spd>.2){kick=1;if(inW&&!swim)splash(P.x,P.z-.2,.05,.8);}}
+kick*=Math.exp(-9*dt);
+const run=spd>4?1:0,amp=Math.min(1,spd/2.4)*(.8+.7*run)*(swim||subm?.3:1)*(inVR?0:1);
+const wob=(swim||subm)?Math.sin(tm*1.6)*.03:0;
+const lat=Math.sin(bob)*.05*amp,vert=-Math.abs(Math.sin(bob))*.11*amp-kick*.07*amp+Math.sin(tm*1.2)*.004+wob;
+const jit=run*amp*.006;
+if(inVR){rig.position.set(P.x,ey,P.z);rig.rotation.y=yaw;}
+else{if(rig.position.lengthSq()>0){rig.position.set(0,0,0);rig.rotation.set(0,0,0);}camera.position.set(P.x+Math.cos(yaw)*lat,ey+vert,P.z-Math.sin(yaw)*lat);}
+if(!inVR)camera.rotation.set(pitch+Math.abs(Math.sin(bob))*.012*amp+kick*.03*amp+(Math.random()-.5)*jit,yaw+(Math.random()-.5)*jit,Math.sin(bob)*.022*amp+(swim||subm?Math.sin(tm*.9)*.02:0),'YXZ');
+if(inVR)camW.copy(camera.position).applyAxisAngle(new T.Vector3(0,1,0),yaw).add(rig.position);else camW.copy(camera.position);
+const cy=camW.y;
+cool-=dt;
+if(!underS&&ey<surf-.06&&cool<=0){underS=1;tUnder=0;exitT=99;cool=.6;}
+else if(underS&&ey>surf+.25&&cool<=0){underS=0;cool=.6;exitT=tUnder>.7?0:1.2;if(tUnder>.7){kick=1.6;splash(P.x,P.z,.12,1.3);}}
+if(underS)tUnder+=dt;else if(exitT<99)exitT+=dt;
+wetV=underS?1:(exitT<99?Math.exp(-exitT/9):0);if(wetV<.03)wetV=0;
+const under=underS;
+U.uw.value=under;uwA+=(under-uwA)*Math.min(1,dt*6);
+if(under&&spd>.5&&Math.random()<dt*3)burst(1);
+for(let i=0;i<BN;i++){if(bl[i]<=0){bp[i*3+1]=-999;continue;}
+bp[i*3+1]+=bv[i]*dt;bp[i*3]+=Math.sin(tm*3+i)*.004;bp[i*3+2]+=Math.cos(tm*2.6+i)*.004;bs[i]*=1+dt*.12;bl[i]-=dt*.04;
+if(bp[i*3+1]>-.03)bl[i]=0;}
+bg.attributes.position.needsUpdate=true;bg.attributes.size.needsUpdate=true;
+gu.player.value.copy(P);sky.position.copy(camW);
+stepTrample(dt,spd);
+// water physics: splashes, wake, entering and diving
+if(inW&&!wasW&&spd>.3)splash(P.x,P.z,.12+spd*.05,1.3);
+wasW=inW;
+if(subm!==wasUW){splash(P.x,P.z,.18,1.5);wasUW=subm;if(subm)burst(70);}
+if(inW&&spd>.2){const dx=mx/spd,dz=mz/spd;
+splash(P.x+dx*.5,P.z+dz*.5,.007+spd*.005,.7);
+splash(P.x-dx*.6,P.z-dz*.6,-(.004+spd*.003),.6);}
+if(swim&&Math.abs(vy)>.5&&ey>surf-.6)splash(P.x,P.z,Math.abs(vy)*.01,.7);
+if(Math.random()<dt*1.5){splash(P.x+(Math.random()-.5)*50,P.z-Math.random()*35,.04+Math.random()*.05,.5);}
+acc=Math.min(3,acc+dt*60);while(acc>=1){simStep();acc--;}
+simPack();
+// sun glare
+const fw=new T.Vector3();camera.getWorldDirection(fw);
+const facing=Math.max(0,fw.dot(sunDir))*(1-uwA),k=Math.pow(facing,5);
+const sp3=camera.position.clone().addScaledVector(sunDir,100).project(camera);
+if(sp3.z<1&&facing>0){const X=(sp3.x*.5+.5)*innerWidth,Y=(-sp3.y*.5+.5)*innerHeight;
+glare.style.background=`radial-gradient(circle at ${X}px ${Y}px,rgba(255,248,225,${Math.min(1,k*1.5)}) 0,rgba(255,235,185,${k*.7}) 10%,rgba(255,220,150,${k*.3}) 35%,transparent 75%)`;
+ghosts.forEach((d,i)=>{const t=[.35,.7,1.35][i],gx=X+(innerWidth/2-X)*t,gy=Y+(innerHeight/2-Y)*t;
+d.style.left=gx-d.offsetWidth/2+'px';d.style.top=gy-d.offsetHeight/2+'px';d.style.opacity=Math.min(.5,k*.9);});
+}else{glare.style.background='none';ghosts.forEach(d=>d.style.opacity=0);}
+wash.style.opacity=Math.min(.55,Math.pow(facing,14)*.8);
+{const hz=Math.hypot(sunDir.x,sunDir.z),src=new T.Vector3(sunDir.x/hz*.72,.69,sunDir.z/hz*.72);
+const q=camera.position.clone().addScaledVector(src,50).project(camera);
+pu.sunUV.value.set(q.x*.5+.5,q.y*.5+.5);
+pu.rayK.value=Math.max(0,Math.min(1,fw.dot(src)*1.6+.35))*(q.z<1?1:0);
+pu.wet.value=wetV;pu.exitT.value=exitT;pu.uwA.value=uwA;mu.uwA.value=uwA;
+pu.camDepth.value=Math.max(-.03-camW.y,0);pu.asp.value=innerWidth/innerHeight;}
+if(inVR)renderer.render(scene,camera);
+else{renderer.setRenderTarget(rt);renderer.render(scene,camera);
+renderer.setRenderTarget(null);renderer.render(postScene,postCam);}}
+renderer.setAnimationLoop(frame);
+</script></body></html>
